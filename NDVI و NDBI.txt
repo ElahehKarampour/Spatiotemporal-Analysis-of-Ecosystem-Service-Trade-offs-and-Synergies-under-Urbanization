@@ -1,0 +1,65 @@
+// نسخه ساده فقط برای NDVI و NDBI
+var region = ee.FeatureCollection('projects/silken-order-468118-q1/assets/san_antonio');
+var years = ['2000', '2006', '2012', '2018', '2024'];
+
+function maskClouds(image) {
+  var qa = image.select('QA_PIXEL');
+  var cloudBitMask = 1 << 3;
+  var cloudShadowBitMask = 1 << 4;
+  return image.updateMask(qa.bitwiseAnd(cloudBitMask).eq(0)
+      .and(qa.bitwiseAnd(cloudShadowBitMask).eq(0)));
+}
+
+years.forEach(function(year) {
+  var yearNum = parseInt(year);
+  var collection;
+  
+  if (yearNum < 2013) {
+    var lt5 = ee.ImageCollection('LANDSAT/LT05/C02/T1_L2')
+        .filterDate(year + '-01-01', year + '-12-31')
+        .filterBounds(region)
+        .map(maskClouds)
+        .select(['SR_B3', 'SR_B4', 'SR_B5'], ['Red', 'NIR', 'SWIR1']);
+    
+    var le7 = ee.ImageCollection('LANDSAT/LE07/C02/T1_L2')
+        .filterDate(year + '-01-01', year + '-12-31')
+        .filterBounds(region)
+        .map(maskClouds)
+        .select(['SR_B3', 'SR_B4', 'SR_B5'], ['Red', 'NIR', 'SWIR1']);
+    
+    collection = lt5.merge(le7);
+  } else {
+    collection = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+        .filterDate(year + '-01-01', year + '-12-31')
+        .filterBounds(region)
+        .map(maskClouds)
+        .select(['SR_B4', 'SR_B5', 'SR_B6'], ['Red', 'NIR', 'SWIR1']);
+  }
+  
+  var composite = collection.median().clip(region);
+  
+  var ndvi = composite.normalizedDifference(['NIR', 'Red']).rename('NDVI');
+  var ndbi = composite.normalizedDifference(['SWIR1', 'NIR']).rename('NDBI');
+  
+  Export.image.toDrive({
+    image: ndvi,
+    description: 'NDVI_' + year,
+    folder: 'Urban_Indices',
+    fileNamePrefix: 'NDVI_' + year,
+    region: region.geometry(),
+    scale: 30,
+    maxPixels: 1e13
+  });
+  
+  Export.image.toDrive({
+    image: ndbi,
+    description: 'NDBI_' + year,
+    folder: 'Urban_Indices',
+    fileNamePrefix: 'NDBI_' + year,
+    region: region.geometry(),
+    scale: 30,
+    maxPixels: 1e13
+  });
+});
+
+Map.centerObject(region, 10);

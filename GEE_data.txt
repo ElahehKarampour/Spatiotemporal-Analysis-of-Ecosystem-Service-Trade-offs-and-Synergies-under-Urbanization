@@ -1,0 +1,538 @@
+// Google Earth Engine Code for Time Series Analysis (2000-2024)
+// Export Data for Ecosystem Services Analysis
+
+// ============================
+// 1. بارگذاری شیپ فایل منطقه مورد مطالعه (سان آنتونیو)
+// ============================
+
+// ابتدا شیپ فایل را به Assets آپلود کنید و مسیر آن را اینجا قرار دهید
+var sanAntonio = ee.FeatureCollection('projects/silken-order-468118-q1/assets/san_antonio');
+
+// استخراج هندسه منطقه
+var sanAntonioGeometry = sanAntonio.geometry();
+
+// ============================
+// 2. تعریف سال‌های هدف
+// ============================
+var targetYears = [2000, 2006, 2012, 2018, 2024];
+
+// ============================
+// 3. توابع کمکی
+// ============================
+
+// تابع محاسبه NDVI
+function calculateNDVI(image) {
+  var ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI');
+  return image.addBands(ndvi);
+}
+
+// تابع فیلتر ابر برای Sentinel-2
+function maskS2clouds(image) {
+  var qa = image.select('QA60');
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+      .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+  return image.updateMask(mask);
+}
+
+// تابع محاسبه NDVI از Landsat
+function addLandsatNDVI(image) {
+  var ndvi = image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI');
+  return image.addBands(ndvi);
+}
+
+// ============================
+// 4. بارگذاری و پردازش داده‌های ماهواره‌ای
+// ============================
+
+// Sentinel-2 (از 2015)
+var sentinel2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+    .filterBounds(sanAntonioGeometry)
+    .filterDate('2015-06-01', '2024-12-31')
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+    .map(maskS2clouds)
+    .map(calculateNDVI);
+
+// Landsat 8 (از 2013)
+var landsat8 = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+    .filterBounds(sanAntonioGeometry)
+    .filterDate('2013-01-01', '2024-12-31')
+    .filter(ee.Filter.lt('CLOUD_COVER', 20))
+    .map(addLandsatNDVI);
+
+// Landsat 7 (2000-2022)
+var landsat7 = ee.ImageCollection('LANDSAT/LE07/C02/T1_L2')
+    .filterBounds(sanAntonioGeometry)
+    .filterDate('2000-01-01', '2022-12-31')
+    .filter(ee.Filter.lt('CLOUD_COVER', 20))
+    .map(addLandsatNDVI);
+
+// Landsat 5 (1984-2012)
+var landsat5 = ee.ImageCollection('LANDSAT/LT05/C02/T1_L2')
+    .filterBounds(sanAntonioGeometry)
+    .filterDate('2000-01-01', '2012-12-31')
+    .filter(ee.Filter.lt('CLOUD_COVER', 20))
+    .map(addLandsatNDVI);
+
+// ============================
+// 5. ترکیب داده‌های Landsat برای پوشش کامل 2000-2024
+// ============================
+var landsatCombined = landsat5.merge(landsat7).merge(landsat8);
+
+// ============================
+// 6. داده‌های زمین‌شناسی و خاک
+// ============================
+
+// داده‌های DEM (ارتفاع)
+var dem = ee.Image('USGS/SRTMGL1_003').clip(sanAntonioGeometry);
+
+// داده‌های خاک - استفاده از باندهای موجود
+var soilSand = ee.Image('OpenLandMap/SOL/SOL_SAND-WFRACTION_USDA-3A1A1A_M/v02')
+    .select('b0')
+    .clip(sanAntonioGeometry)
+    .rename('sand');
+
+var soilClay = ee.Image('OpenLandMap/SOL/SOL_CLAY-WFRACTION_USDA-3A1A1A_M/v02')
+    .select('b0')
+    .clip(sanAntonioGeometry)
+    .rename('clay');
+
+// ترکیب داده‌های خاک
+var soilData = ee.Image.cat([soilSand, soilClay]);
+
+print('Soil data loaded - using b0 band (0-5cm depth)');
+
+// ============================
+// 7. داده‌های پوشش زمین (NLCD)
+// ============================
+
+// لیست سال‌های NLCD موجود در GEE
+var nlcd2001 = ee.Image('USGS/NLCD/NLCD2001').select('landcover').clip(sanAntonioGeometry);
+var nlcd2006 = ee.Image('USGS/NLCD/NLCD2006').select('landcover').clip(sanAntonioGeometry);
+var nlcd2011 = ee.Image('USGS/NLCD/NLCD2011').select('landcover').clip(sanAntonioGeometry);
+var nlcd2016 = ee.Image('USGS/NLCD/NLCD2016').select('landcover').clip(sanAntonioGeometry);
+
+print('NLCD datasets loaded successfully');
+
+// ============================
+// 8. محاسبه سری زمانی NDVI
+// ============================
+
+// تابع برای دریافت میانگین NDVI سالانه
+function getAnnualNDVI(year) {
+  var startDate = ee.Date.fromYMD(year, 1, 1);
+  var endDate = ee.Date.fromYMD(year, 12, 31);
+  
+  // انتخاب مجموعه داده مناسب
+  var collection;
+  if (year >= 2015) {
+    collection = sentinel2.filterDate(startDate, endDate);
+  } else {
+    collection = landsatCombined.filterDate(startDate, endDate);
+  }
+  
+  // محاسبه میانگین سالانه
+  var annualMean = collection.select('NDVI').mean();
+  
+  return annualMean
+      .set('year', year)
+      .set('system:time_start', startDate.millis())
+      .rename('NDVI');
+}
+
+// ============================
+// 9. محاسبه شاخص‌های خدمات اکوسیستمی
+// ============================
+
+// 9.1 Food Supply (بر اساس NDVI و زمین کشاورزی)
+function calculateFoodSupply(ndviImage, nlcdImage) {
+  // شناسایی زمین‌های کشاورزی (کدهای 81 و 82 در NLCD)
+  var cropland = nlcdImage.eq(81).or(nlcdImage.eq(82));
+  
+  // NDVI موزون برای زمین‌های کشاورزی
+  var ndvi = ndviImage.clamp(-1, 1);
+  var foodSupply = ndvi.multiply(cropland).rename('food_supply');
+  
+  return foodSupply;
+}
+
+// 9.2 Water Yield (بر اساس شیب و پوشش زمین)
+function calculateWaterYield(demImage, nlcdImage) {
+  // محاسبه شیب
+  var slope = ee.Terrain.slope(demImage);
+  
+  // ضریب پوشش زمین برای آبدهی
+  var landcoverFactor = nlcdImage.remap(
+    [11, 21, 22, 23, 24, 31, 41, 42, 43, 52, 71, 81, 82, 90, 95],
+    [0.9, 0.6, 0.5, 0.4, 0.3, 0.8, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.6, 0.3, 0.4]
+  );
+  
+  // شاخص آبدهی ساده‌شده
+  var waterYield = slope
+      .multiply(-0.05)  // تأثیر کمتر شیب
+      .add(1)
+      .multiply(landcoverFactor)
+      .clamp(0, 1)
+      .rename('water_yield');
+  
+  return waterYield;
+}
+
+// 9.3 Carbon Storage (بر اساس پوشش زمین)
+function calculateCarbonStorage(nlcdImage) {
+  // مقادیر ذخیره کربن بر اساس نوع پوشش زمین (تن در هکتار)
+  var carbonValues = nlcdImage.remap(
+    [11, 21, 22, 23, 24, 31, 41, 42, 43, 52, 71, 81, 82, 90, 95],
+    [0.1, 0.2, 0.4, 0.6, 0.8, 0.1, 10, 8, 6, 2, 1, 1, 2, 3, 4]
+  );
+  
+  return carbonValues.rename('carbon_storage');
+}
+
+// 9.4 Soil Retention (بر اساس شیب و پوشش)
+function calculateSoilRetention(demImage, nlcdImage) {
+  var slope = ee.Terrain.slope(demImage);
+  
+  // ضریب حفظ خاک بر اساس پوشش زمین
+  var retentionFactor = nlcdImage.remap(
+    [11, 21, 22, 23, 24, 31, 41, 42, 43, 52, 71, 81, 82, 90, 95],
+    [0.1, 0.3, 0.4, 0.5, 0.6, 0.1, 0.9, 0.8, 0.7, 0.5, 0.6, 0.7, 0.6, 0.8, 0.7]
+  );
+  
+  var soilRetention = retentionFactor
+      .multiply(slope.multiply(-0.005).add(1))  // تأثیر کمتر شیب
+      .clamp(0, 1)
+      .rename('soil_retention');
+  
+  return soilRetention;
+}
+
+// 9.5 Habitat Quality (کیفیت زیستگاه) - نسخه اصلاح شده
+function calculateHabitatQuality(nlcdImage) {
+  // 1. Habitat Suitability
+  var habitatSuitability = nlcdImage.remap(
+    [11, 21, 22, 23, 24, 31, 41, 42, 43, 52, 71, 81, 82, 90, 95],
+    [0.1, 0.1, 0.1, 0.1, 0.1, 0.2, 1.0, 1.0, 1.0, 0.8, 0.7, 0.4, 0.3, 0.9, 0.9]
+  );
+  
+  // 2. Threat Sources با استفاده از جایگزینی
+  // ابتدا همه پیکسل‌ها را صفر می‌کنیم
+  var urbanThreat = nlcdImage.multiply(0);
+  // سپس مقادیر را جایگزین می‌کنیم
+  urbanThreat = urbanThreat
+    .where(nlcdImage.eq(21), 1.0)
+    .where(nlcdImage.eq(22), 0.8)
+    .where(nlcdImage.eq(23), 0.9)
+    .where(nlcdImage.eq(24), 1.0);
+  
+  var agricultureThreat = nlcdImage.multiply(0)
+    .where(nlcdImage.eq(81), 0.7)
+    .where(nlcdImage.eq(82), 0.8);
+  
+  // 3. Total Threat
+  var totalThreat = urbanThreat.max(agricultureThreat);
+  
+  // 4. Sensitivity
+  var sensitivity = nlcdImage.remap(
+    [11, 21, 22, 23, 24, 31, 41, 42, 43, 52, 71, 81, 82, 90, 95],
+    [0.1, 0.0, 0.0, 0.0, 0.0, 0.2, 0.9, 0.9, 0.9, 0.7, 0.6, 0.3, 0.4, 0.8, 0.8]
+  );
+  
+  // 5. Calculate Habitat Quality
+  var k = sensitivity.multiply(totalThreat).multiply(2.5);
+  var habitatQuality = habitatSuitability
+      .multiply(k.multiply(-1).exp())
+      .clamp(0, 1)
+      .rename('habitat_quality');
+  
+  return habitatQuality;
+}
+
+// 9.6 تابع اصلی برای محاسبه همه خدمات
+function calculateAllEcosystemServices(year) {
+  print('Calculating ecosystem services for year: ' + year);
+  
+  var ndviImage = getAnnualNDVI(year);
+  
+  var nlcdImage;
+  if (year < 2004) {
+    nlcdImage = nlcd2001;
+    print('   Using NLCD 2001 for year ' + year);
+  } else if (year < 2009) {
+    nlcdImage = nlcd2006;
+    print('   Using NLCD 2006 for year ' + year);
+  } else if (year < 2014) {
+    nlcdImage = nlcd2011;
+    print('   Using NLCD 2011 for year ' + year);
+  } else {
+    nlcdImage = nlcd2016;
+    print('   Using NLCD 2016 for year ' + year);
+  }
+  
+  var foodSupply = calculateFoodSupply(ndviImage, nlcdImage);
+  var waterYield = calculateWaterYield(dem, nlcdImage);
+  var carbonStorage = calculateCarbonStorage(nlcdImage);
+  var soilRetention = calculateSoilRetention(dem, nlcdImage);
+  var habitatQuality = calculateHabitatQuality(nlcdImage);
+  
+  var allServices = ndviImage.rename('ndvi')
+      .addBands(foodSupply)
+      .addBands(waterYield)
+      .addBands(carbonStorage)
+      .addBands(soilRetention)
+      .addBands(habitatQuality)
+      .set('year', year);
+  
+  return allServices;
+}
+
+// ============================
+// 10. محاسبه خدمات برای سال‌های مورد نظر
+// ============================
+
+var ecosystemServicesByYear = {};
+targetYears.forEach(function(year) {
+  ecosystemServicesByYear[year] = calculateAllEcosystemServices(year);
+});
+
+print('All ecosystem services calculated successfully');
+
+// ============================
+// 11. تجسم داده‌ها
+// ============================
+
+// پالت رنگی
+var palettes = {
+  'ndvi': ['FFFFFF', 'CE7E45', 'DF923D', 'F1B555', 'FCD163', '99B718',
+           '74A901', '66A000', '529400', '3E8601', '207401', '056201',
+           '004C00', '023B01', '012E01', '011D01', '011301'],
+  'food_supply': ['FFE6CC', 'FFB366', 'FF8000', 'CC6600', '994C00'],
+  'water_yield': ['E6F2FF', '99CCFF', '4D94FF', '0066CC', '004C99'],
+  'carbon_storage': ['E6FFE6', '99FF99', '4DFF4D', '00CC00', '009900'],
+  'soil_retention': ['FFF0E6', 'FFCC99', 'FF9966', 'CC6633', '993300'],
+  'habitat_quality': ['FF0000', 'FFA500', 'FFFF00', 'ADFF2F', '008000', '006400']
+};
+
+// پارامترهای تجسم
+var visParams = {
+  'ndvi': {min: 0, max: 0.8, palette: palettes.ndvi},
+  'food_supply': {min: 0, max: 0.6, palette: palettes.food_supply},
+  'water_yield': {min: 0, max: 0.8, palette: palettes.water_yield},
+  'carbon_storage': {min: 0, max: 8, palette: palettes.carbon_storage},
+  'soil_retention': {min: 0, max: 0.8, palette: palettes.soil_retention},
+  'habitat_quality': {min: 0, max: 1, palette: palettes.habitat_quality}
+};
+
+// مرکز کردن نقشه
+Map.centerObject(sanAntonioGeometry, 10);
+
+// اضافه کردن لایه منطقه مطالعه
+Map.addLayer(sanAntonio, {color: 'red', fillColor: '00000000'}, 'Study Area');
+
+// ایجاد نقشه برای هر سال و هر سرویس
+targetYears.forEach(function(year) {
+  var services = ecosystemServicesByYear[year];
+  
+  // NDVI
+  Map.addLayer(services.select('ndvi').clip(sanAntonioGeometry), 
+               visParams.ndvi, 
+               'NDVI ' + year,
+               false);
+  
+  // Food Supply
+  Map.addLayer(services.select('food_supply').clip(sanAntonioGeometry), 
+               visParams.food_supply, 
+               'Food Supply ' + year,
+               false);
+  
+  // Water Yield
+  Map.addLayer(services.select('water_yield').clip(sanAntonioGeometry), 
+               visParams.water_yield, 
+               'Water Yield ' + year,
+               false);
+  
+  // Carbon Storage
+  Map.addLayer(services.select('carbon_storage').clip(sanAntonioGeometry), 
+               visParams.carbon_storage, 
+               'Carbon Storage ' + year,
+               false);
+  
+  // Soil Retention
+  Map.addLayer(services.select('soil_retention').clip(sanAntonioGeometry), 
+               visParams.soil_retention, 
+               'Soil Retention ' + year,
+               false);
+  
+  // Habitat Quality
+  Map.addLayer(services.select('habitat_quality').clip(sanAntonioGeometry), 
+               visParams.habitat_quality, 
+               'Habitat Quality ' + year,
+               false);
+});
+
+// فعال کردن برخی لایه‌ها به طور پیش‌فرض
+Map.addLayer(ecosystemServicesByYear[2024].select('ndvi').clip(sanAntonioGeometry), 
+             visParams.ndvi, 
+             'NDVI 2024 (default)',
+             true);
+
+Map.addLayer(ecosystemServicesByYear[2024].select('habitat_quality').clip(sanAntonioGeometry), 
+             visParams.habitat_quality, 
+             'Habitat Quality 2024 (default)',
+             true);
+
+print('All layers added to map');
+
+// ============================
+// 12. Export نقشه‌ها به Drive
+// ============================
+
+function exportServiceMaps(year) {
+  var services = ecosystemServicesByYear[year];
+  
+  // لیست نام خدمات
+  var serviceNames = ['ndvi', 'food_supply', 'water_yield', 'carbon_storage', 'soil_retention', 'habitat_quality'];
+  
+  // Export هر سرویس به صورت جداگانه
+  serviceNames.forEach(function(service) {
+    Export.image.toDrive({
+      image: services.select(service).clip(sanAntonioGeometry),
+      description: service.toUpperCase() + '_' + year,
+      scale: 100,
+      region: sanAntonioGeometry,
+      maxPixels: 1e9,
+      folder: 'Ecosystem_Services_Maps',
+      crs: 'EPSG:4326',
+      fileFormat: 'GeoTIFF'
+    });
+  });
+  
+  // Export همه خدمات در یک فایل
+  Export.image.toDrive({
+    image: services.clip(sanAntonioGeometry),
+    description: 'All_Services_' + year,
+    scale: 100,
+    region: sanAntonioGeometry,
+    maxPixels: 1e9,
+    folder: 'Ecosystem_Services_Maps',
+    crs: 'EPSG:4326',
+    fileFormat: 'GeoTIFF'
+  });
+  
+  print('Export tasks created for year: ' + year);
+}
+
+// Export نقشه‌ها برای همه سال‌ها
+targetYears.forEach(function(year) {
+  exportServiceMaps(year);
+});
+
+// ============================
+// 13. Export آمار و تحلیل‌ها
+// ============================
+
+var statsCollection = ee.FeatureCollection(
+  targetYears.map(function(year) {
+    var services = ecosystemServicesByYear[year];
+    
+    var stats = services.reduceRegion({
+      reducer: ee.Reducer.mean(),
+      geometry: sanAntonioGeometry,
+      scale: 100,
+      maxPixels: 1e9
+    });
+    
+    return ee.Feature(null, {
+      'year': year,
+      'ndvi_mean': stats.get('ndvi'),
+      'food_supply_mean': stats.get('food_supply'),
+      'water_yield_mean': stats.get('water_yield'),
+      'carbon_storage_mean': stats.get('carbon_storage'),
+      'soil_retention_mean': stats.get('soil_retention'),
+      'habitat_quality_mean': stats.get('habitat_quality')
+    });
+  })
+);
+
+Export.table.toDrive({
+  collection: statsCollection,
+  description: 'Ecosystem_Services_Statistics',
+  fileFormat: 'CSV',
+  folder: 'Ecosystem_Services_Maps'
+});
+
+print('Statistics export task created');
+
+// ============================
+// 14. محاسبه تغییرات بین سال‌ها
+// ============================
+
+function calculateChanges(year1, year2) {
+  var services1 = ecosystemServicesByYear[year1];
+  var services2 = ecosystemServicesByYear[year2];
+  
+  var changes = services2
+      .subtract(services1)
+      .rename(['ndvi_change', 'food_supply_change', 'water_yield_change', 
+               'carbon_storage_change', 'soil_retention_change', 'habitat_quality_change'])
+      .set('period', year1 + '_to_' + year2);
+  
+  return changes;
+}
+
+var changePeriods = [
+  [2000, 2006],
+  [2006, 2012],
+  [2012, 2018],
+  [2018, 2024],
+  [2000, 2024]
+];
+
+changePeriods.forEach(function(period) {
+  var year1 = period[0];
+  var year2 = period[1];
+  var changes = calculateChanges(year1, year2);
+  
+  Export.image.toDrive({
+    image: changes.clip(sanAntonioGeometry),
+    description: 'Changes_' + year1 + '_to_' + year2,
+    scale: 100,
+    region: sanAntonioGeometry,
+    maxPixels: 1e9,
+    folder: 'Ecosystem_Services_Maps',
+    crs: 'EPSG:4326',
+    fileFormat: 'GeoTIFF'
+  });
+  
+  print('Change map export task created: ' + year1 + ' to ' + year2);
+});
+
+// ============================
+// 15. گزارش نهایی
+// ============================
+var separator = '==================================================';
+print(separator);
+print('ECOSYSTEM SERVICES ANALYSIS (2000-2024)');
+print(separator);
+print('Study Area: San Antonio (from Shapefile)');
+print('Target Years: ' + targetYears.join(', '));
+print('Services Calculated:');
+print('  1. NDVI (Vegetation Index)');
+print('  2. Food Supply (Index 0-1)');
+print('  3. Water Yield (Index 0-1)');
+print('  4. Carbon Storage (t/ha)');
+print('  5. Soil Retention (Index 0-1)');
+print('  6. Habitat Quality (Index 0-1)');
+print('');
+print('Export Summary:');
+print('  - 30 individual service maps (5 years × 6 services)');
+print('  - 5 combined service maps (1 per year)');
+print('  - 5 change maps (between periods)');
+print('  - 1 statistics CSV file');
+print('');
+print('Total: 41 export tasks created');
+print('');
+print('Note: Scale set to 100m for faster export');
+print('Note: Habitat Quality uses simplified InVEST model');
+print(separator);
